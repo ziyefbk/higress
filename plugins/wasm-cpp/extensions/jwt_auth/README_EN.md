@@ -70,7 +70,7 @@ The configuration fields for each item in `from_headers` are as follows:
 The configuration fields for each item in `claims_to_headers` are as follows:
 | Name            | Data Type        | Requirements | Default Value | Description                                   |
 | --------------- | ---------------- | ------------ | ------------- | --------------------------------------------- |
-| `claim`         | string           | Required     | -             | The specified field in the JWT payload, must be a string or unsigned integer type. |
+| `claim`         | string           | Required     | -             | The specified field in the JWT payload, must be a string, unsigned integer, or boolean. Boolean values are forwarded as `true` or `false`. |
 | `header`        | string           | Required     | -             | The value of the field extracted from the payload is set to this request header and forwarded to the backend. |
 | `override`      | bool             | Optional     | true          | If true, existing headers with the same name will be overridden; if false, they will be appended. |
 

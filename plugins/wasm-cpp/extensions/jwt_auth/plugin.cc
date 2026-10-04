@@ -313,6 +313,15 @@ Status PluginRootContext::consumerVerify(
           token->addClaimToHeader(claim_to_header.second.header,
                                   std::to_string((unsigned long long)num_value),
                                   claim_to_header.second.override);
+        } else {
+          const auto& fields = jwt.payload_pb_.fields();
+          const auto claim = fields.find(claim_to_header.first);
+          if (claim != fields.end() &&
+              claim->second.kind_case() == google::protobuf::Value::kBoolValue) {
+            token->addClaimToHeader(claim_to_header.second.header,
+                                    claim->second.bool_value() ? "true" : "false",
+                                    claim_to_header.second.override);
+          }
         }
       }
     }

@@ -43,6 +43,9 @@ class MockContext : public proxy_wasm::ContextBase {
   MOCK_METHOD(WasmResult, addHeaderMapValue,
               (WasmHeaderMapType /* type */, std::string_view /* jwt */,
                std::string_view /* value */));
+  MOCK_METHOD(WasmResult, replaceHeaderMapValue,
+              (WasmHeaderMapType /* type */, std::string_view /* key */,
+               std::string_view /* value */));
   MOCK_METHOD(WasmResult, sendLocalResponse,
               (uint32_t /* response_code */, std::string_view /* body */,
                Pairs /* additional_headers */, uint32_t /* grpc_status */,
@@ -323,6 +326,146 @@ TEST_F(JwtAuthTest, ClaimToHeader) {
   EXPECT_EQ(context_->onRequestHeaders(0, false),
             FilterHeadersStatus::Continue);
 }
+
+// Signed with the public test-only HS256 key
+// "higress-2365-test-only-secret-key". The payload includes both boolean values,
+// existing supported types, and unsupported types. Verification uses a fixed
+// time between iat=1600000000 and exp=1900000000.
+class JwtClaimToHeaderTypesTest : public JwtAuthTest,
+                                  public ::testing::WithParamInterface<int> {
+ protected:
+  void configureClaims(int mode) {
+    auto config = nlohmann::json::parse(R"({
+      "consumers": [{
+        "name": "claims-consumer",
+        "issuer": "claims-test",
+        "jwks": "{\"keys\":[{\"kty\":\"oct\",\"kid\":\"claims-test\",\"k\":\"aGlncmVzcy0yMzY1LXRlc3Qtb25seS1zZWNyZXQta2V5\",\"alg\":\"HS256\"}]}",
+        "claims_to_headers": [
+          {"claim": "enabled", "header": "x-enabled"},
+          {"claim": "disabled", "header": "x-disabled"},
+          {"claim": "sub", "header": "x-sub"},
+          {"claim": "count", "header": "x-count"},
+          {"claim": "zero", "header": "x-zero"},
+          {"claim": "empty", "header": "x-empty"},
+          {"claim": "missing", "header": "x-missing"},
+          {"claim": "null_claim", "header": "x-null"},
+          {"claim": "object_claim", "header": "x-object"},
+          {"claim": "array_claim", "header": "x-array"}
+        ]
+      }]
+    })");
+    // Mode 0: absent headers, default override. Modes 1/2: existing headers,
+    // explicitly configured override=true/false respectively.
+    if (mode != 0) {
+      for (auto& mapping : config["consumers"][0]["claims_to_headers"]) {
+        mapping["override"] = mode == 1;
+      }
+    }
+    const auto configuration = config.dump();
+    BufferBase buffer;
+    buffer.set({configuration.data(), configuration.size()});
+    EXPECT_CALL(*mock_context_, getBuffer(WasmBufferType::PluginConfiguration))
+        .WillOnce([&buffer](WasmBufferType) { return &buffer; });
+    ASSERT_TRUE(root_context_->configure(configuration.size()));
+    current_time_ = uint64_t{1700000000} * 1000000000;
+    jwt_header_ =
+        "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImNsYWltcy10ZXN0In0."
+        "eyJpc3MiOiJjbGFpbXMtdGVzdCIsImlhdCI6MTYwMDAwMDAwMCwiZXhwIjoxOTAwMDAwMDAw"
+        "LCJlbmFibGVkIjp0cnVlLCJkaXNhYmxlZCI6ZmFsc2UsInN1YiI6InRlc3QiLCJjb3VudCI6"
+        "NDIsInplcm8iOjAsImVtcHR5IjoiIiwibnVsbF9jbGFpbSI6bnVsbCwib2JqZWN0X2NsYWlt"
+        "Ijp7InZhbHVlIjp0cnVlfSwiYXJyYXlfY2xhaW0iOlt0cnVlLGZhbHNlXX0."
+        "cVh2Uitp6wU9f-ra5o3eRTjb4EiejQu3YOAPQAho6U8";
+  }
+};
+
+TEST_P(JwtClaimToHeaderTypesTest, VerifiedClaims) {
+  const int mode = GetParam();
+  ASSERT_NO_FATAL_FAILURE(configureClaims(mode));
+  const std::unordered_map<std::string, std::string> expected = {
+      {"x-enabled", "true"}, {"x-disabled", "false"}, {"x-sub", "test"},
+      {"x-count", "42"},     {"x-zero", "0"},         {"x-empty", ""},
+      // Preserve the existing missing-claim behavior in this narrow fix.
+      {"x-missing", ""}};
+  std::unordered_map<std::string, std::vector<std::string>> headers;
+  if (mode != 0) {
+    for (const auto& header : expected) {
+      headers[header.first] = {"client-value"};
+    }
+  }
+  ON_CALL(*mock_context_, addHeaderMapValue(testing::_, testing::_, testing::_))
+      .WillByDefault([&](WasmHeaderMapType, std::string_view key,
+                         std::string_view value) {
+        headers[std::string(key)].emplace_back(value);
+        return WasmResult::Ok;
+      });
+  ON_CALL(*mock_context_, replaceHeaderMapValue(testing::_, testing::_, testing::_))
+      .WillByDefault([&](WasmHeaderMapType, std::string_view key,
+                         std::string_view value) {
+        headers[std::string(key)] = {std::string(value)};
+        return WasmResult::Ok;
+      });
+  EXPECT_CALL(*mock_context_, getHeaderMapValue(testing::_, testing::_, testing::_))
+      .Times(testing::AnyNumber());
+  for (const auto& header : expected) {
+    if (mode == 1) {
+      EXPECT_CALL(*mock_context_,
+                  getHeaderMapValue(WasmHeaderMapType::RequestHeaders,
+                                    std::string_view(header.first), testing::_))
+          .WillOnce([](WasmHeaderMapType, std::string_view,
+                       std::string_view* value) {
+            *value = "client-value";
+            return WasmResult::Ok;
+          });
+      EXPECT_CALL(*mock_context_,
+                  replaceHeaderMapValue(WasmHeaderMapType::RequestHeaders,
+                                        std::string_view(header.first),
+                                    std::string_view(header.second)));
+    } else {
+      EXPECT_CALL(*mock_context_,
+                  addHeaderMapValue(WasmHeaderMapType::RequestHeaders,
+                                    std::string_view(header.first),
+                                    std::string_view(header.second)));
+    }
+  }
+  // Unsupported types must not introduce headers or replace existing ones.
+  for (const auto* header : {"x-null", "x-object", "x-array"}) {
+    EXPECT_CALL(*mock_context_,
+                addHeaderMapValue(testing::_, std::string_view(header), testing::_))
+        .Times(0);
+    EXPECT_CALL(*mock_context_,
+                replaceHeaderMapValue(testing::_, std::string_view(header), testing::_))
+        .Times(0);
+  }
+  EXPECT_CALL(*mock_context_,
+              addHeaderMapValue(testing::_, std::string_view("X-Mse-Consumer"),
+                                std::string_view("claims-consumer")));
+  EXPECT_CALL(*mock_context_,
+              removeHeaderMapValue(testing::_, std::string_view("X-Mse-Consumer")));
+  EXPECT_CALL(*mock_context_, sendLocalResponse(testing::_, testing::_, testing::_,
+                                               testing::_, testing::_)).Times(0);
+  EXPECT_EQ(context_->onRequestHeaders(0, false), FilterHeadersStatus::Continue);
+  for (const auto& header : expected) {
+    const std::vector<std::string> values = mode == 2
+        ? std::vector<std::string>{"client-value", header.second}
+        : std::vector<std::string>{header.second};
+    EXPECT_EQ(headers[header.first], values) << header.first;
+  }
+}
+
+TEST_F(JwtClaimToHeaderTypesTest, InvalidSignatureDoesNotForwardClaims) {
+  ASSERT_NO_FATAL_FAILURE(configureClaims(0));
+  jwt_header_[jwt_header_.rfind('.') + 1] = 'A';
+  EXPECT_CALL(*mock_context_, addHeaderMapValue(testing::_, testing::_, testing::_))
+      .Times(0);
+  EXPECT_CALL(*mock_context_, replaceHeaderMapValue(testing::_, testing::_, testing::_))
+      .Times(0);
+  EXPECT_CALL(*mock_context_, sendLocalResponse(401, testing::_, testing::_,
+                                               testing::_, testing::_));
+  EXPECT_EQ(context_->onRequestHeaders(0, false), FilterHeadersStatus::StopIteration);
+}
+
+INSTANTIATE_TEST_SUITE_P(HeaderModes, JwtClaimToHeaderTypesTest,
+                         ::testing::Values(0, 1, 2));
 
 TEST_F(JwtAuthTest, CustomHeader) {
   std::string configuration = R"(
