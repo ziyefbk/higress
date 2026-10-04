@@ -115,13 +115,16 @@ func (c *eurekaHttpClient) getApplications(path string) (*Applications, error) {
 	}
 
 	if code != 200 {
-		log.Warnf("Failed to get applications, http code : %v", code)
+		return nil, fmt.Errorf("failed to get applications, http code: %v", code)
 	}
 
 	var rj fargo.GetAppsResponseJson
 	if err = json.Unmarshal(res, &rj); err != nil {
 		log.Errorf("Failed to unmarshal response body to fargo.GetAppResponseJson, error: %v", err)
 		return nil, err
+	}
+	if rj.Response == nil {
+		return nil, fmt.Errorf("missing applications in eureka response")
 	}
 
 	apps := map[string]*fargo.Application{}
@@ -164,7 +167,7 @@ func (c *eurekaHttpClient) getApplication(path string) (*fargo.Application, erro
 	}
 
 	if code != 200 {
-		log.Warnf("Failed to get application, http code : %v", code)
+		return nil, fmt.Errorf("failed to get application, http code: %v", code)
 	}
 
 	var rj fargo.GetAppResponseJson

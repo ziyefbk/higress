@@ -132,7 +132,13 @@ func (w *watcher) Run() {
 
 	w.Status = provider.ProbeWatcherStatus(w.Domain, strconv.FormatUint(uint64(w.Port), 10))
 	w.doFullRefresh()
+	w.mutex.Lock()
+	if w.isStop {
+		w.mutex.Unlock()
+		return
+	}
 	w.Ready(true)
+	w.mutex.Unlock()
 
 	for {
 		select {
@@ -148,14 +154,19 @@ func (w *watcher) Run() {
 func (w *watcher) Stop() {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
+	if w.isStop {
+		return
+	}
 
 	for serviceName := range w.WatchingServices {
 		if err := w.unsubscribe(serviceName); err != nil {
 			log.Errorf("Failed to unsubscribe service : %v", serviceName)
 			continue
 		}
-		w.cache.DeleteServiceWrapper(makeHost(serviceName))
 	}
+	// Empty-response protection may retain services after their subscriptions
+	// disappear. Retire every cache entry still owned by this registry.
+	w.cache.DeleteServiceWrappersForRegistry(w.Type, w.Name)
 	w.UpdateService()
 	w.isStop = true
 	close(w.stop)
@@ -173,11 +184,22 @@ func (w *watcher) GetRegistryType() string {
 // doFullRefresh todo(lql): it's better to support deltaRefresh
 func (w *watcher) doFullRefresh() {
 	w.mutex.Lock()
-	defer w.mutex.Unlock()
+	stopped := w.isStop
+	w.mutex.Unlock()
+	if stopped {
+		return
+	}
 
 	applications, err := w.eurekaClient.GetApplications()
 	if err != nil {
 		log.Errorf("Failed to full fetch eureka services, error : %v", err)
+		return
+	}
+	// Do not hold the lifecycle lock over network I/O: a slow full refresh must
+	// not block application updates or Stop. Recheck after the fetch completes.
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	if w.isStop {
 		return
 	}
 
@@ -234,7 +256,17 @@ func (w *watcher) subscribe(service *fargo.Application) error {
 		log.Errorf("failed to subscribe service %v, error: %v", service.Name, err)
 		return err
 	}
-	w.WatchingServices[service.Name] = NewPlan(w.eurekaClient, service.Name, callback)
+	var plan *Plan
+	plan = NewPlan(w.eurekaClient, service.Name, func(update *fargo.Application) error {
+		w.mutex.Lock()
+		defer w.mutex.Unlock()
+		// Stop/unsubscribe must not race a callback that restores retired data.
+		if w.isStop || w.WatchingServices[service.Name] != plan {
+			return nil
+		}
+		return callback(update)
+	})
+	w.WatchingServices[service.Name] = plan
 	return nil
 }
 

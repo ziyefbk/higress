@@ -39,6 +39,7 @@ import (
 type Cache interface {
 	UpdateServiceWrapper(service string, data *ingress.ServiceWrapper)
 	DeleteServiceWrapper(service string)
+	DeleteServiceWrappersForRegistry(registryType, registryName string)
 	UpdateProxyWrapper(name string, data *ingress.ProxyWrapper)
 	DeleteProxyWrapper(name string)
 	UpdateConfigCache(kind config.GroupVersionKind, key string, config *config.Config, forceDelete bool)
@@ -221,6 +222,24 @@ func (s *store) DeleteServiceWrapper(service string) {
 	defer s.mux.Unlock()
 
 	if data, exist := s.sew[service]; exist {
+		s.toBeDeleted = append(s.toBeDeleted, data)
+		s.deferredDeleteServices[service] = struct{}{}
+	}
+}
+
+// DeleteServiceWrappersForRegistry also retires protected services whose
+// subscriptions have disappeared. Deletion remains deferred until reconciliation.
+func (s *store) DeleteServiceWrappersForRegistry(registryType, registryName string) {
+	s.mux.Lock()
+	defer s.mux.Unlock()
+
+	for service, data := range s.sew {
+		if data.RegistryType != registryType || data.RegistryName != registryName {
+			continue
+		}
+		if _, alreadyDeleted := s.deferredDeleteServices[service]; alreadyDeleted {
+			continue
+		}
 		s.toBeDeleted = append(s.toBeDeleted, data)
 		s.deferredDeleteServices[service] = struct{}{}
 	}
