@@ -213,6 +213,12 @@ func (w *watcher) subscribe(service *fargo.Application) error {
 			if err != nil {
 				return err
 			}
+			// A nonempty response with no UP instances is authoritative. Withdraw
+			// endpoints immediately; deferred deletion needs a McpBridge reconcile.
+			if len(se.Endpoints) == 0 {
+				w.cache.ClearServiceWrapperEndpointsForRegistry(makeHost(service.Name), w.Type, w.Name)
+				return nil
+			}
 			w.cache.UpdateServiceWrapper(makeHost(service.Name), &ingress.ServiceWrapper{
 				ServiceName:  service.Name,
 				ServiceEntry: se,
@@ -266,6 +272,9 @@ func (w *watcher) generateServiceEntry(app *fargo.Application) (*v1alpha3.Servic
 	endpoints := make([]*v1alpha3.WorkloadEntry, 0)
 	sePort := provider.GetServiceVport(makeHost(app.Name), w.Vport)
 	for _, instance := range app.Instances {
+		if instance.Status != fargo.UP {
+			continue
+		}
 		protocol := common.HTTP
 		if val, _ := instance.Metadata.GetString("protocol"); val != "" {
 			if protocol = common.ParseProtocol(val); protocol == common.Unsupported {

@@ -38,6 +38,7 @@ import (
 
 type Cache interface {
 	UpdateServiceWrapper(service string, data *ingress.ServiceWrapper)
+	ClearServiceWrapperEndpointsForRegistry(service, registryType, registryName string)
 	DeleteServiceWrapper(service string)
 	UpdateProxyWrapper(name string, data *ingress.ProxyWrapper)
 	DeleteProxyWrapper(name string)
@@ -214,6 +215,24 @@ func (s *store) UpdateServiceWrapper(service string, data *ingress.ServiceWrappe
 		log.Debugf("service in deferredDeleteServices updated, host: %s", service)
 	}
 	log.Infof("ServiceEntry updated, host: %s", service)
+}
+
+// ClearServiceWrapperEndpointsForRegistry immediately withdraws endpoints while
+// preserving the service's valid ports and metadata. Unlike deferred deletion,
+// this update is visible without a registry configuration reconciliation.
+func (s *store) ClearServiceWrapperEndpointsForRegistry(service, registryType, registryName string) {
+	s.mux.Lock()
+	defer s.mux.Unlock()
+
+	old, exist := s.sew[service]
+	if !exist || old.RegistryType != registryType || old.RegistryName != registryName {
+		return
+	}
+	data := *old
+	data.ServiceEntry = old.ServiceEntry.DeepCopy()
+	data.ServiceEntry.Endpoints = nil
+	s.sew[service] = &data
+	s.toBeUpdated = append(s.toBeUpdated, &data)
 }
 
 func (s *store) DeleteServiceWrapper(service string) {
